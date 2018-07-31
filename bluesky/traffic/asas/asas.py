@@ -7,7 +7,7 @@ from bluesky.tools.aero import ft, nm
 from bluesky.tools.trafficarrays import TrafficArrays, RegisterElementParameters
 
 # Register settings defaults
-settings.set_variable_defaults(prefer_compiled=False, asas_dt=1.0,
+settings.set_variable_defaults(prefer_compiled=False, asas_dt=5.0,
                                asas_dtlookahead=300.0, asas_mar=1.2,
                                asas_pzr=5.0, asas_pzh=1000.0,
                                asas_vmin=200.0, asas_vmax=500.0)
@@ -31,6 +31,7 @@ from . import Eby
 from . import MVP
 from . import Swarm
 from . import SSD
+from . import SeqSSD_faster
 
 
 class ASAS(TrafficArrays):
@@ -45,6 +46,7 @@ class ASAS(TrafficArrays):
     # If pyclipper is installed add it to CRmethods-dict
     if SSD.loaded_pyclipper():
         CRmethods["SSD"] = SSD
+        CRmethods["SEQSSD"] = SeqSSD_faster
 
     @classmethod
     def addCDMethod(asas, name, module):
@@ -57,14 +59,14 @@ class ASAS(TrafficArrays):
     def __init__(self):
         super(ASAS, self).__init__()
         with RegisterElementParameters(self):
-            # ASAS info PER AIRCRAFT:
-            self.inconf = np.array([], dtype=bool)  # In-conflict flag
+            # ASAS info per aircraft:
+            self.inconf    = np.array([], dtype=bool)  # In-conflict flag per aircraft
             self.tcpamax = np.array([])  # Maximum time to CPA for aircraft in conflict
-            self.active = np.array([], dtype=bool)  # whether the autopilot follows ASAS or not
-            self.trk = np.array([])  # heading provided by the ASAS [deg]
-            self.tas = np.array([])  # speed provided by the ASAS (eas) [m/s]
-            self.alt = np.array([])  # alt provided by the ASAS [m]
-            self.vs = np.array([])  # vspeed provided by the ASAS [m/s]
+            self.active   = np.array([], dtype=bool)  # whether the autopilot follows ASAS or not
+            self.trk      = np.array([])  # heading provided by the ASAS [deg]
+            self.tas      = np.array([])  # speed provided by the ASAS (eas) [m/s]
+            self.alt      = np.array([])  # speed alt by the ASAS [m]
+            self.vs       = np.array([])  # speed vspeed by the ASAS [m/s]
 
         # All ASAS variables are initialized in the reset function
         self.reset()
@@ -88,8 +90,8 @@ class ASAS(TrafficArrays):
         self.swasas       = True                            # [-] whether to perform CD&R
         self.tasas        = 0.0                             # Next time ASAS should be called
 
-        self.vmin         = settings.asas_vmin * nm / 3600. # [m/s] Minimum ASAS velocity (200 kts)
-        self.vmax         = settings.asas_vmax * nm / 3600. # [m/s] Maximum ASAS velocity (600 kts)
+        self.vmin         = settings.asas_vmin * nm / 3600. # [m/s] Minimum ASAS velocity (300 kts)
+        self.vmax         = settings.asas_vmax * nm / 3600. # [m/s] Maximum ASAS velocity (500 kts)
         self.vsmin        = -3000. / 60. * ft               # [m/s] Minimum ASAS vertical speed
         self.vsmax        = 3000. / 60. * ft                # [m/s] Maximum ASAS vertical speed
 
@@ -115,7 +117,10 @@ class ASAS(TrafficArrays):
         self.asasn        = np.array([])               # [m/s] North resolution speed from ASAS
         self.asase        = np.array([])               # [m/s] East resolution speed from ASAS
         self.asaseval     = False                      # [-] Whether target resolution is calculated or not
-
+        #Constraints for resolution
+        self.spdcons = 3.                              #[-] Speed constaint
+        self.trncons = 180                            #[deg] turn constaint
+        
         # Sets of pairs: conflict pairs, LoS pairs
         self.confpairs = list()  # Conflict pairs detected in the current timestep (used for resolving)
         self.confpairs_unique = set()  # Unique conflict pairs (a, b) = (b, a) are merged
@@ -124,12 +129,22 @@ class ASAS(TrafficArrays):
         self.lospairs_unique = set()  # Unique LOS pairs (a, b) = (b, a) are merged
         self.confpairs_all = list()  # All conflicts since simt=0
         self.lospairs_all = list()  # All losses of separation since simt=0
-
+        self.intrusions = list()    #Keeps track of the severity of all intrusions [nm]
+        self.intrusionstime = list() #logs in the time instance when a new LOS is detected [s]
+        
         # Conflict time and geometry data per conflict pair
         self.tcpa = np.array([])  # Time to CPA
         self.tLOS = np.array([])  # Time to start LoS
         self.qdr = np.array([])  # Bearing from ownship to intruder
         self.dist = np.array([])  # Horizontal distance between ""
+        
+        #For SEQSSD CR
+        self.layers_dict = {0: 'No solution', 1: 'Full FRV layer', 2: 'FRV zones within tla', 3: 'Current conflicts within tla', 
+                            4: 'FRV zones at minimum time to LoS', 5: 'Current conflicts at minimum time to LoS',
+                            6: 'Current conflicts at low distance to LoS', 7: 'Current conflicts at low dcpa'}
+        self.strategy_dict = {'CS1': [1],'CS2': [2],'CS3': [3],'CS4': [4],'CS5': [5],'CS6': [6],'CS7': [7],
+                          'SRS1': [1,2,3,4,5,6],'SRS2': [2,4,6],'SRS3': [3,5,6],'SRS4': [4,5,7]} #key entries are priocodes
+        self.layer_count = [0]*len(self.layers_dict)
 
     def toggle(self, flag=None):
         if flag is None:
@@ -158,10 +173,14 @@ class ASAS(TrafficArrays):
         self.tLOS = np.array([])  # Time to start LoS
         self.qdr = np.array([])  # Bearing from ownship to intruder
         self.dist = np.array([])  # Horizontal distance between ""
-
+        self.vrel = np.array([])  # relative velocity between conflict pairs
+        self.dcpa2 = np.array([])  # squared distance at CPA between conflict pairs 
         # Force change labels in interface
         # if settings.gui == "pygame":
         #     bs.traf.label = [[" ", " ", " ", " "] for i in range(bs.traf.ntraf)]
+        
+        self.intrusions = list()    #Keeps track of the severity of all intrusions [nm]
+        self.intrusionstime = list() #logs in the time instance when a new LOS is detected [s]
 
         return
 
@@ -320,6 +339,8 @@ class ASAS(TrafficArrays):
         '''Set the prio switch and the type of prio '''
         if self.cr_name == "SSD":
             options = ["RS1","RS2","RS3","RS4","RS5","RS6","RS7","RS8","RS9"]
+        elif self.cr_name == "SEQSSD":
+            options = ["CS1","CS2","CS3","CS4","CS5","CS6","CS7","SRS1","SRS2","SRS3","SRS4"]
         else:
             options = ["FF1", "FF2", "FF3", "LAY1", "LAY2"]
         if flag is None:
@@ -337,6 +358,13 @@ class ASAS(TrafficArrays):
                              "\n     RS9:  Counterclockwise turning" + \
                              "\nPriority is currently " + ("ON" if self.swprio else "OFF") + \
                              "\nPriority code is currently: " + str(self.priocode)
+            elif self.cr_name == "SEQSSD":
+                return True, "PRIORULES [ON/OFF] [PRIOCODE]"  + \
+                             "\nAvailable priority codes: " + \
+                             "\n CS1-CS7 for coordination strategies" + \
+                             "\n RS1-RS4 for sequential strategies" + \
+                             "\nPriority is currently " + ("ON" if self.swprio else "OFF") + \
+                             "\nPriority code is currently: " + str(self.priocode)    
             else:
                 return True, "PRIORULES [ON/OFF] [PRIOCODE]"  + \
                              "\nAvailable priority codes: " + \
@@ -402,6 +430,29 @@ class ASAS(TrafficArrays):
             self.vmax = spd * nm / 3600.
         else:
             self.vmin = spd * nm / 3600.
+            
+    def SetSPDCons(self, percentage=None):
+        # Input is in percentage
+        if percentage is None:
+            return True, "SPD limits for resolution are set to [" + str(self.spdcons*100) + " %" + "]"
+        else:
+            if percentage == 50:
+                self.vmin = 400
+                self.vmax = 500
+                self.spdcons = percentage/100.
+            else:
+                self.vmin = 300
+                self.vmax = 500
+                self.spdcons = 1
+            
+            
+            
+    def SetTRNCons(self, angle=None):
+        # Input is degrees
+        if angle is None:
+            return True, "Turn limits for resolution are set to [" + str(self.trncons) + " deg" + "]"
+        else:
+            self.trncons = angle
 
     def create(self, n=1):
         super(ASAS, self).create(n)
@@ -427,7 +478,7 @@ class ASAS(TrafficArrays):
 
             if idx2 >= 0:
                 # Distance vector using flat earth approximation
-                re = 6371000.
+                re      = 6371000.
                 dist = re * np.array([np.radians(bs.traf.lon[idx2] - bs.traf.lon[idx1]) *
                                       np.cos(0.5 * np.radians(bs.traf.lat[idx2] +
                                                               bs.traf.lat[idx1])),
@@ -465,7 +516,7 @@ class ASAS(TrafficArrays):
                 # Waypoint recovery after conflict: Find the next active waypoint
                 # and send the aircraft to that waypoint.
                 iwpid = bs.traf.ap.route[idx1].findact(idx1)
-                if iwpid != -1:  # To avoid problems if there are no waypoints
+                if iwpid != -1: # To avoid problems if there are no waypoints
                     bs.traf.ap.route[idx1].direct(idx1, bs.traf.ap.route[idx1].wpname[iwpid])
 
                 # If conflict is solved, remove it from the resopairs list
@@ -483,7 +534,7 @@ class ASAS(TrafficArrays):
         if bs.traf.ntraf:
             # Conflict detection
             self.confpairs, self.lospairs, self.inconf, self.tcpamax, \
-                self.qdr, self.dist, self.tcpa, self.tLOS = \
+                self.qdr, self.dist, self.tcpa, self.tLOS, self.vrel, self.dcpa2 = \
                 self.cd.detect(bs.traf, bs.traf, self.R, self.dh, self.dtlookahead)
 
             # Conflict resolution if there are conflicts
@@ -497,13 +548,33 @@ class ASAS(TrafficArrays):
             # confpairs_unique keeps only one of these
             confpairs_unique = {frozenset(pair) for pair in self.confpairs}
             lospairs_unique = {frozenset(pair) for pair in self.lospairs}
-
+  
             self.confpairs_all.extend(confpairs_unique - self.confpairs_unique)
+            
+            
             self.lospairs_all.extend(lospairs_unique - self.lospairs_unique)
+            
+            new_los = lospairs_unique - self.lospairs_unique
+
+            new_los_pairs = [tuple(x) for x in new_los]
+            if len(new_los_pairs)>0:
+                idx = [self.confpairs.index(pair) for pair in new_los_pairs]
+                self.intrusions.extend((self.Rm - np.sqrt(self.dcpa2[index]))/nm for index in idx)
+                self.intrusionstime.extend([bs.sim.simt]*len(new_los_pairs))
+            
 
             # Update confpairs_unique and lospairs_unique
             self.confpairs_unique = confpairs_unique
             self.lospairs_unique = lospairs_unique
+            
+            #print("number of confpairsunique")
+            #print(len(self.confpairs_unique))
+            #print(len(self.lospairs_unique))
+            
+            #print("number of conflicts so far")
+            #print(len(self.confpairs_all))
+            #print(len(self.lospairs_all))
+            
 
             self.ResumeNav()
 
