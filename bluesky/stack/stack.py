@@ -664,6 +664,12 @@ def init():
             bs.traf.ap.selspdcmd,
             "Speed command (autopilot)"
         ],
+        "SPDCONS": [
+            "SPDCONS percentage (-)",
+            "[int]",
+            bs.traf.asas.SetSPDCons,
+            "Set a Speed Constraint for Resolution"
+        ],
         "SSD": [
             "SSD ALL/CONFLICTS/OFF or SSD acid0, acid1, ...",
             "txt,[...]",
@@ -707,7 +713,12 @@ def init():
             bs.traf.trails.setTrails,
             "Toggle aircraft trails on/off"
         ],
-
+        "TRNCONS": [
+            "TRNCONS angle  [deg]",
+            "[int]",
+            bs.traf.asas.SetTRNCons,
+            "Toggle aircraft trails on/off"
+        ],
         "VNAV": [
             "VNAV acid,[ON/OFF]",
             "acid,[onoff]",
