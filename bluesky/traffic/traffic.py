@@ -11,7 +11,6 @@ from bluesky.tools.aero import fpm, kts, ft, g0, Rearth, nm, \
                          vatmos,  vtas2cas, vtas2mach, casormach, vcasormach
 
 from bluesky.tools.trafficarrays import TrafficArrays, RegisterElementParameters
-
 from .windsim import WindSim
 from .conditional import Condition
 from .trails import Trails
@@ -105,7 +104,13 @@ class Traffic(TrafficArrays):
                 self.cas     = np.array([])  # calibrated airspeed [m/s]
                 self.M       = np.array([])  # mach number
                 self.vs      = np.array([])  # vertical speed [m/s]
-
+                
+                
+                #Creation time
+                self.cretime = np.array([]) #Creation time [s]
+                #time in conflict
+                self.timeinconf = np.array([]) #Time in conflict [s] (this value is updated in area)
+                
                 # Atmosphere
                 self.p       = np.array([])  # air pressure [N/m2]
                 self.rho     = np.array([])  # air density [kg/m3]
@@ -236,7 +241,12 @@ class Traffic(TrafficArrays):
 
         self.hdg[-n:]  = achdg
         self.trk[-n:]  = achdg
-
+        
+        #Creation time
+        self.cretime[-n:] = bs.sim.simt
+        #Time in conflict
+        self.timeinconf[-n:] = 0
+        
         # Velocities
         self.tas[-n:], self.cas[-n:], self.M[-n:] = vcasormach(acspd, acalt)
         self.gs[-n:]      = self.tas[-n:]
