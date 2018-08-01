@@ -47,7 +47,6 @@ def detect(ownship, intruder, RPZ, HPZ, tlookahead):
 
     # Calculate distance^2 at CPA (minimum distance^2)
     dcpa2 = dist * dist - tcpa * tcpa * dv2
-
     # Check for horizontal conflict
     R2 = RPZ * RPZ
     swhorconf = dcpa2 < R2  # conflict or not
@@ -99,5 +98,20 @@ def detect(ownship, intruder, RPZ, HPZ, tlookahead):
     dist = dist[swconfl]
     tcpa = tcpa[swconfl]
     tinconf = tinconf[swconfl]
+    vrel = vrel[swconfl]
+    dcpa_2 = dcpa2[swconfl] #distance at CPA squared 
+    
+    """
+    #DEBUG PRINTS
+    print("Conflict pairs ", confpairs)
+    print("LoS pairs ", lospairs)
+    print("In Conflict", inconf)
+    print("tcpamax", tcpamax)
+    print("qdr", qdr)
+    print("dist", dist)
+    print("tLoS", tinconf)
+    print("tcpa", tcpa)
+    print("vrel", vrel)
+    """ 
 
-    return confpairs, lospairs, inconf, tcpamax, qdr, dist, tcpa, tinconf
+    return confpairs, lospairs, inconf, tcpamax, qdr, dist, tcpa, tinconf, vrel, dcpa_2
